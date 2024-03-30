@@ -144,9 +144,12 @@ impl Connection {
     pub fn send(&mut self, req: Request) -> Result<(), io::Error> {
         let mut buf = Vec::new();
         req.encode(&mut buf);
-        buf.resize(1500, 0);
 
-        self.stream.write_all(&buf)?;
+        let mut buf_with_len = Vec::new();
+        buf_with_len.extend((buf.len() as u32).to_le_bytes());
+        buf_with_len.extend(buf);
+
+        self.stream.write_all(&buf_with_len)?;
         Ok(())
     }
 }
