@@ -211,6 +211,7 @@ impl Encode for IcmpOption {
 
                 (opt.valid_lifetime.as_secs() as u32).encode(&mut buf);
                 (opt.preferred_lifetime.as_secs() as u32).encode(&mut buf);
+                0u32.encode(&mut buf);
                 buf.put_slice(&opt.prefix.octets());
             }
             Self::Mtu(mtu) => {
@@ -259,6 +260,9 @@ impl Decode for IcmpOption {
                 let flags = u8::decode(&mut buf)?;
                 let valid_lifetime = u32::decode(&mut buf)?;
                 let preferred_lifetime = u32::decode(&mut buf)?;
+
+                // Resv
+                u32::decode(&mut buf)?;
 
                 let mut prefix = [0; 16];
                 for index in 0..16 {

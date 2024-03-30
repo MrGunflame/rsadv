@@ -119,7 +119,7 @@ impl Interface {
             }
         }
 
-        Err(Error::NoInterface)
+        Ok(addrs)
     }
 
     pub async fn add_addr(

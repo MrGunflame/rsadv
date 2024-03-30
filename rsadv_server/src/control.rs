@@ -9,6 +9,13 @@ use crate::State;
 const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 
 pub async fn control_loop(state: Arc<State>) {
+    // connect will return ECONNREFUSED if the socket file exists but
+    // no one is listening. In that case we take over the socket
+    // (e.g. becuase the previous process crashed without removing the socket).
+    if UnixStream::connect(CONTROL_SOCKET_ADDR).await.is_ok() {
+        panic!("socket already in use");
+    }
+
     let socket = UnixListener::bind(CONTROL_SOCKET_ADDR).unwrap();
 
     loop {
@@ -45,12 +52,15 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
 
         match req {
             Request::AddPrefix(prefix) => {
-                state.prefixes.write().push(crate::Prefix {
-                    prefix: prefix.prefix,
-                    prefix_length: prefix.prefix_length,
-                    preferred_lifetime: prefix.preferred_lifetime,
-                    valid_lifetime: prefix.valid_lifetime,
-                });
+                state.prefixes.write().insert(
+                    prefix.prefix,
+                    crate::Prefix {
+                        prefix: prefix.prefix,
+                        prefix_length: prefix.prefix_length,
+                        preferred_lifetime: prefix.preferred_lifetime,
+                        valid_lifetime: prefix.valid_lifetime,
+                    },
+                );
 
                 state.prefixes_changed.notify_one();
             }

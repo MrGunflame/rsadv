@@ -3,9 +3,11 @@
 
 mod config;
 mod control;
+mod database;
 mod linux;
 mod ndp;
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddrV6};
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use config::Config;
 use control::control_loop;
+use database::Database;
 use linux::{set_hop_limit, Interface};
 use ndp::{
     Encode, IcmpContent, IcmpOption, IcmpType, LinkLayerAddress, PrefixInformation,
@@ -61,12 +64,42 @@ async fn main() {
         }),
     };
 
+    let state = Arc::new(State::default());
+
+    let mut db = match Database::load(&config.db) {
+        Ok(db) => {
+            let mut prefixes = state.prefixes.write();
+
+            for prefix in &db.prefixes {
+                prefixes.insert(
+                    prefix.prefix,
+                    Prefix {
+                        prefix: prefix.prefix,
+                        prefix_length: prefix.prefix_length,
+                        preferred_lifetime: match prefix.preferred {
+                            crate::database::Lifetime::Duration(dur) => Lifetime::Duration(dur),
+                            crate::database::Lifetime::Until(ts) => Lifetime::Until(ts),
+                        },
+                        valid_lifetime: match prefix.valid {
+                            crate::database::Lifetime::Duration(dur) => Lifetime::Duration(dur),
+                            crate::database::Lifetime::Until(ts) => Lifetime::Until(ts),
+                        },
+                    },
+                );
+            }
+
+            db
+        }
+        Err(err) => {
+            tracing::error!("failed to load database: {:?}", err);
+            Database::default()
+        }
+    };
+
     let mut buf = Vec::new();
     packet.encode(&mut buf);
 
     let mut next_multicast_ra = Instant::now();
-
-    let state = Arc::new(State::default());
 
     tokio::task::spawn(control_loop(state.clone()));
 
@@ -91,7 +124,9 @@ async fn main() {
         };
 
         if update_prefixes {
-            for prefix in &*state.prefixes.read() {
+            db.prefixes.clear();
+
+            for prefix in state.prefixes.read().values() {
                 let addr = generate_addr(prefix.prefix, mac);
 
                 if let Err(err) = interface
@@ -105,6 +140,23 @@ async fn main() {
                 {
                     tracing::error!("adding address to interface failed: {:?}", err);
                 }
+
+                db.prefixes.push(database::Prefix {
+                    prefix: prefix.prefix,
+                    prefix_length: prefix.prefix_length,
+                    preferred: match prefix.preferred_lifetime {
+                        Lifetime::Duration(dur) => crate::database::Lifetime::Duration(dur),
+                        Lifetime::Until(ts) => crate::database::Lifetime::Until(ts),
+                    },
+                    valid: match prefix.valid_lifetime {
+                        Lifetime::Duration(dur) => crate::database::Lifetime::Duration(dur),
+                        Lifetime::Until(ts) => crate::database::Lifetime::Until(ts),
+                    },
+                });
+            }
+
+            if let Err(err) = db.save(&config.db) {
+                tracing::error!("failed to save db: {:?}", err);
             }
         }
 
@@ -116,7 +168,7 @@ async fn main() {
             }),
             IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
         ];
-        state.prefixes.write().retain(|prefix| {
+        state.prefixes.write().retain(|_, prefix| {
             if prefix.valid_lifetime.duration().is_zero() {
                 false
             } else {
@@ -154,7 +206,7 @@ async fn main() {
 
 #[derive(Debug, Default)]
 pub struct State {
-    prefixes: parking_lot::RwLock<Vec<Prefix>>,
+    prefixes: parking_lot::RwLock<HashMap<Ipv6Addr, Prefix>>,
     mtu: u32,
     prefixes_changed: Notify,
 }
