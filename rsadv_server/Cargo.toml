@@ -1,0 +1,21 @@
+[package]
+name = "rsadv_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.6.0"
+socket2 = { version = "0.5.6", features = ["all"] }
+
+rtnetlink = "0.14.1"
+libc = "0.2.153"
+tokio = { version = "1.37.0", features = ["full"] }
+futures = "0.3.30"
+netlink-packet-route = "0.19.0"
+toml = "0.8.12"
+serde = { version = "1.0.197", features = ["derive"] }
+tracing = { version = "0.1.40", features = ["log"] }
+pretty_env_logger = "0.5.0"
+parking_lot = "0.12.1"
+
+rsadv_control = { version = "0.1.0", path = "../rsadv_control" }

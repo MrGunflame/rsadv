@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "rsadv_control",
+    "rsadv_control_cli",
+    "rsadv_server",
+]
