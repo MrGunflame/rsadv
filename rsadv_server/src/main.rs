@@ -7,13 +7,13 @@ mod linux;
 mod ndp;
 
 use std::io;
-use std::net::{Ipv6Addr, SocketAddrV6};
+use std::net::{IpAddr, Ipv6Addr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use config::Config;
 use control::control_loop;
-use linux::set_hop_limit;
+use linux::{set_hop_limit, Interface};
 use ndp::{
     Encode, IcmpContent, IcmpOption, IcmpType, LinkLayerAddress, PrefixInformation,
     RecursiveDnsServer, RouterAdvertisement, RouterSolicitation,
@@ -22,6 +22,7 @@ use rsadv_control::Lifetime;
 use rtnetlink::new_connection;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
+use tokio::sync::Notify;
 
 use crate::ndp::{Decode, IcmpPacket};
 
@@ -37,16 +38,10 @@ async fn main() {
     let (conn, handle, _) = new_connection().unwrap();
     tokio::task::spawn(conn);
 
-    let mac = linux::get_interface_mac(&handle, &config.interface)
-        .await
-        .unwrap();
-
-    let addrs = linux::get_interface_addrs(&handle, &config.interface)
-        .await
-        .unwrap();
-    let scope_id = linux::get_interface_scope(&handle, &config.interface)
-        .await
-        .unwrap();
+    let interface = Interface::new(&handle, &config.interface).await.unwrap();
+    let mac = interface.mac().await.unwrap();
+    let addrs = interface.addrs().await.unwrap();
+    let scope_id = interface.scope_id();
 
     let Some(link_local) = addrs.into_iter().find(is_link_local) else {
         tracing::error!("no link local address");
@@ -76,7 +71,7 @@ async fn main() {
     tokio::task::spawn(control_loop(state.clone()));
 
     loop {
-        let addr = tokio::select! {
+        let (addr, update_prefixes) = tokio::select! {
             res = socket.recv_from() => {
                 let (packet, addr) = res.unwrap();
 
@@ -84,13 +79,34 @@ async fn main() {
                     continue;
                 }
 
-                addr
+                (addr, false)
             }
             _ = tokio::time::sleep_until(next_multicast_ra.into()) => {
                 next_multicast_ra += RADV_INTERVAL;
-                SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
+                (SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id), true)
+            }
+            _ = state.prefixes_changed.notified() => {
+                (SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id), true)
             }
         };
+
+        if update_prefixes {
+            for prefix in &*state.prefixes.read() {
+                let addr = generate_addr(prefix.prefix, mac);
+
+                if let Err(err) = interface
+                    .add_addr(
+                        IpAddr::V6(addr),
+                        prefix.prefix_length,
+                        Some(prefix.preferred_lifetime.duration()),
+                        Some(prefix.valid_lifetime.duration()),
+                    )
+                    .await
+                {
+                    tracing::error!("adding address to interface failed: {:?}", err);
+                }
+            }
+        }
 
         let mut options = vec![
             IcmpOption::Mtu(config.mtu),
@@ -100,16 +116,22 @@ async fn main() {
             }),
             IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
         ];
-        for prefix in &*state.prefixes.read() {
-            options.push(IcmpOption::PrefixInformation(PrefixInformation {
-                prefix: prefix.prefix,
-                prefix_length: prefix.prefix_length,
-                on_link: true,
-                autonomous: true,
-                preferred_lifetime: prefix.preferred_lifetime.duration(),
-                valid_lifetime: prefix.valid_lifetime.duration(),
-            }));
-        }
+        state.prefixes.write().retain(|prefix| {
+            if prefix.valid_lifetime.duration().is_zero() {
+                false
+            } else {
+                options.push(IcmpOption::PrefixInformation(PrefixInformation {
+                    prefix: prefix.prefix,
+                    prefix_length: prefix.prefix_length,
+                    on_link: true,
+                    autonomous: true,
+                    preferred_lifetime: prefix.preferred_lifetime.duration(),
+                    valid_lifetime: prefix.valid_lifetime.duration(),
+                }));
+
+                true
+            }
+        });
 
         let packet = IcmpPacket {
             typ: IcmpType::RouterAdvertisement,
@@ -134,6 +156,7 @@ async fn main() {
 pub struct State {
     prefixes: parking_lot::RwLock<Vec<Prefix>>,
     mtu: u32,
+    prefixes_changed: Notify,
 }
 
 #[derive(Clone, Debug)]
@@ -226,4 +249,27 @@ pub trait Ipv6AddrExt {
 impl Ipv6AddrExt for Ipv6Addr {
     const MULTICAST_ALL_NODES: Self = Self::new(0xff02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01);
     const MULTICAST_ALL_ROUTERS: Self = Self::new(0xff02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02);
+}
+
+fn generate_addr(prefix: Ipv6Addr, mac: [u8; 6]) -> Ipv6Addr {
+    let prefix = &prefix.octets()[0..8];
+
+    Ipv6Addr::from([
+        prefix[0],
+        prefix[1],
+        prefix[2],
+        prefix[3],
+        prefix[4],
+        prefix[5],
+        prefix[6],
+        prefix[7],
+        mac[0] ^ 2,
+        mac[1],
+        mac[2],
+        0xff,
+        0xfe,
+        mac[3],
+        mac[4],
+        mac[5],
+    ])
 }

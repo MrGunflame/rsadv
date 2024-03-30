@@ -51,6 +51,8 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
                     preferred_lifetime: prefix.preferred_lifetime,
                     valid_lifetime: prefix.valid_lifetime,
                 });
+
+                state.prefixes_changed.notify_one();
             }
         }
     }
