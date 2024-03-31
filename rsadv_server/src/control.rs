@@ -78,8 +78,8 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
         resp.encode(&mut buf);
 
         let mut buf_with_len = Vec::new();
-        buf_with_len.extend(&buf);
         buf_with_len.extend((buf.len() as u32).to_le_bytes());
+        buf_with_len.extend(&buf);
 
         if let Err(err) = conn.write_all(&buf_with_len).await {
             tracing::error!("error serving conn: {:?}", err);
