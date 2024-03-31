@@ -166,10 +166,10 @@ async fn main() {
             loop {
                 let addr = futures::select_biased! {
                     _ = tokio::time::sleep_until(next_multicast_ra.into()).fuse() => {
-                        SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_ROUTERS, 0, 0, scope_id)
+                        SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
                     }
                     res = rs_rx.recv().fuse() => {
-                        let addr = res.unwrap();
+                        let addr: SocketAddrV6 = res.unwrap();
 
                         // All RAs in response to RSs MUST be delayed between 0 and `MAX_RA_DELAY_TIME`.
                         let delay = rng.gen_range(Duration::ZERO..MAX_RA_DELAY_TIME);
@@ -181,10 +181,27 @@ async fn main() {
                             continue;
                         }
 
+                        // If the source address is UNSPECIFIED we MUST send a multicast RA instead,
+                        // otherwise we can send it directly to the host as a unicast.
                         tokio::time::sleep_until(ts.into()).await;
-                        addr
+                        if addr.ip().is_unspecified() {
+                            SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
+                        } else {
+                            addr
+                        }
+
                     }
                 };
+
+                // Multicast RAs MUST be sent no faster than `MIN_DELAY_BETWEEN_RAS`.
+                if addr.ip().is_multicast() {
+                    let elapsed_since_ra = last_multicast_ra.elapsed();
+                    if elapsed_since_ra < MIN_DELAY_BETWEEN_RAS {
+                        // FIXME: This sleep will block unicast RAs even though they are
+                        // always legal without rate limiting.
+                        tokio::time::sleep(MIN_DELAY_BETWEEN_RAS - elapsed_since_ra).await;
+                    }
+                }
 
                 let mut options = vec![
                     IcmpOption::Mtu(config.mtu),
