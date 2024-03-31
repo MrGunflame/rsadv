@@ -37,8 +37,13 @@ use crate::ndp::{Decode, IcmpPacket};
 async fn main() {
     pretty_env_logger::init();
 
-    let file = std::fs::read_to_string("config.toml").unwrap();
-    let config: Config = toml::from_str(&file).unwrap();
+    let config = match Config::from_file("config.toml") {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!("failed to read config: {}", err);
+            std::process::exit(1);
+        }
+    };
 
     // MaxRtrAdvInterval MUST be >= 4s && <= 1800s.
     let max_rtr_adv_interval = match Duration::from_secs(config.max_rtr_adv_interval) {
