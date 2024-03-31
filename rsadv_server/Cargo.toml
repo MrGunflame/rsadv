@@ -22,3 +22,4 @@ rsadv_control = { version = "0.1.0", path = "../rsadv_control" }
 bincode = "1.3.3"
 rand = { version = "0.8.5", features = ["small_rng"] }
 thiserror = "1.0.58"
+ragequit = "0.1.1"

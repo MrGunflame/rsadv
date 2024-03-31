@@ -16,12 +16,13 @@ use std::time::{Duration, Instant};
 use config::Config;
 use control::control_loop;
 use database::Database;
-use futures::FutureExt;
+use futures::{pin_mut, FutureExt};
 use linux::Interface;
 use ndp::{
     Encode, IcmpContent, IcmpOption, IcmpType, LinkLayerAddress, PrefixInformation,
     RecursiveDnsServer, RouterAdvertisement, RouterSolicitation,
 };
+use ragequit::SHUTDOWN;
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -36,6 +37,7 @@ use crate::ndp::{Decode, IcmpPacket};
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
+    ragequit::init();
 
     let config = match Config::from_file("config.toml") {
         Ok(config) => config,
@@ -156,6 +158,7 @@ async fn main() {
     {
         let socket = socket.clone();
         let state = state.clone();
+        let shutdown = SHUTDOWN.listen();
         tokio::task::spawn(async move {
             let mut last_multicast_ra = Instant::now();
             let mut next_multicast_ra = Instant::now();
@@ -169,8 +172,12 @@ async fn main() {
 
             let mut initial_ras_sent = 0;
 
+            pin_mut!(shutdown);
             loop {
                 let addr = futures::select_biased! {
+                    _ = shutdown.as_mut().fuse() => {
+                        SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
+                    },
                     _ = tokio::time::sleep_until(next_multicast_ra.into()).fuse() => {
                         SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
                     }
@@ -201,6 +208,13 @@ async fn main() {
                         tokio::time::sleep_until(ts.into()).await;
                         addr
                     }
+                };
+
+                // On shutdown we should send a RA with the `router_liftime` field set to 0.
+                let router_lifetime = if shutdown.is_in_progress() {
+                    Duration::ZERO
+                } else {
+                    3 * max_rtr_adv_interval
                 };
 
                 let mut options = vec![
@@ -239,7 +253,7 @@ async fn main() {
                         cur_hop_limit: 64,
                         managed: false,
                         other: false,
-                        router_lifetime: 3 * max_rtr_adv_interval,
+                        router_lifetime,
                         reachable_timer: None,
                         retrans_timer: None,
                         options,
@@ -248,6 +262,10 @@ async fn main() {
 
                 if let Err(err) = socket.send_to(&packet, addr).await {
                     tracing::error!("failed to send RA: {}", err);
+                }
+
+                if shutdown.is_in_progress() {
+                    break;
                 }
 
                 let mut interval = rng.sample(uniform);
@@ -262,6 +280,10 @@ async fn main() {
 
                 last_multicast_ra = next_multicast_ra;
                 next_multicast_ra += interval;
+            }
+
+            if let Err(err) = socket.close().await {
+                tracing::error!("failed to close socket: {}", err);
             }
         });
     }
@@ -351,7 +373,7 @@ async fn main() {
         }
     });
 
-    tokio::signal::ctrl_c().await.unwrap();
+    SHUTDOWN.wait().await;
 }
 
 #[derive(Debug, Default)]
@@ -402,7 +424,7 @@ impl IcmpSocket {
                     match IcmpPacket::decode(&buf[..]) {
                         Ok(packet) => return Ok((packet, addr)),
                         Err(err) => {
-                            tracing::error!("failed to decode packet from {:?}: {:?}", addr, err);
+                            tracing::debug!("failed to decode packet from {:?}: {:?}", addr, err);
                         }
                     }
                 }
@@ -425,6 +447,15 @@ impl IcmpSocket {
                 Err(_) => continue,
             }
         }
+    }
+
+    async fn close(&self) -> Result<(), io::Error> {
+        let socket = self.socket.get_ref();
+
+        let addr = socket.local_addr()?.as_socket_ipv6().unwrap();
+        socket.leave_multicast_v6(&Ipv6Addr::MULTICAST_ALL_ROUTERS, addr.scope_id())?;
+
+        Ok(())
     }
 }
 
