@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use rsadv_control::Request;
-use tokio::io::AsyncReadExt;
+use rsadv_control::{Request, Response};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::State;
@@ -66,6 +66,24 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
 
                 state.prefixes_changed.notify_one();
             }
+            Request::RemovePrefix(prefix) => {
+                state.prefixes.write().remove(&prefix.prefix);
+                state.prefixes_changed.notify_one();
+            }
+        }
+
+        let resp = Response::Ok;
+
+        let mut buf = Vec::new();
+        resp.encode(&mut buf);
+
+        let mut buf_with_len = Vec::new();
+        buf_with_len.extend(&buf);
+        buf_with_len.extend((buf.len() as u32).to_le_bytes());
+
+        if let Err(err) = conn.write_all(&buf_with_len).await {
+            tracing::error!("error serving conn: {:?}", err);
+            return;
         }
     }
 }

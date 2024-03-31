@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::Ipv6Addr;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, SystemTime};
@@ -10,6 +10,7 @@ const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 #[derive(Clone, Debug)]
 pub enum Request {
     AddPrefix(Prefix),
+    RemovePrefix(Prefix),
 }
 
 impl Request {
@@ -20,6 +21,36 @@ impl Request {
         match self {
             Self::AddPrefix(prefix) => {
                 buf.put_u32_le(1);
+
+                buf.put_slice(&prefix.prefix.octets());
+                buf.put_u8(prefix.prefix_length);
+
+                match prefix.preferred_lifetime {
+                    Lifetime::Duration(dur) => {
+                        buf.put_u8(1);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                    Lifetime::Until(ts) => {
+                        let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+                        buf.put_u8(2u8);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                }
+
+                match prefix.valid_lifetime {
+                    Lifetime::Duration(dur) => {
+                        buf.put_u8(1);
+                        buf.put_u32(dur.as_secs() as u32);
+                    }
+                    Lifetime::Until(ts) => {
+                        let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+                        buf.put_u8(2u8);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                }
+            }
+            Self::RemovePrefix(prefix) => {
+                buf.put_u32_le(2);
 
                 buf.put_slice(&prefix.prefix.octets());
                 buf.put_u8(prefix.prefix_length);
@@ -95,6 +126,41 @@ impl Request {
                     valid_lifetime,
                 }))
             }
+            2 => {
+                if buf.remaining() < 16 + 1 + 1 + 4 + 1 + 4 {
+                    return Err(Error::Eof);
+                }
+
+                let mut prefix = [0; 16];
+                for index in 0..16 {
+                    prefix[index] = buf.get_u8();
+                }
+
+                let prefix_length = buf.get_u8();
+
+                let preferred_lifetime = match buf.get_u8() {
+                    1 => Lifetime::Duration(Duration::from_secs(buf.get_u32_le().into())),
+                    2 => Lifetime::Until(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(buf.get_u32_le().into()),
+                    ),
+                    _ => return Err(Error::Eof),
+                };
+
+                let valid_lifetime = match buf.get_u8() {
+                    1 => Lifetime::Duration(Duration::from_secs(buf.get_u32_le().into())),
+                    2 => Lifetime::Until(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(buf.get_u32_le().into()),
+                    ),
+                    _ => return Err(Error::Eof),
+                };
+
+                Ok(Self::RemovePrefix(Prefix {
+                    prefix: Ipv6Addr::from(prefix),
+                    prefix_length,
+                    preferred_lifetime,
+                    valid_lifetime,
+                }))
+            }
             _ => Err(Error::Eof),
         }
     }
@@ -126,8 +192,47 @@ impl Lifetime {
 }
 
 #[derive(Clone, Debug)]
+pub enum Response {
+    Ok,
+}
+
+impl Response {
+    pub const fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
+impl Response {
+    pub fn encode<B>(&self, mut buf: B)
+    where
+        B: BufMut,
+    {
+        match self {
+            Self::Ok => {
+                buf.put_u32_le(0);
+            }
+        }
+    }
+
+    pub fn decode<B>(mut buf: B) -> Result<Self, Error>
+    where
+        B: Buf,
+    {
+        if buf.remaining() < 4 {
+            return Err(Error::Eof);
+        }
+
+        match buf.get_u32_le() {
+            0 => Ok(Self::Ok),
+            _ => Err(Error::Eof),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error {
     Eof,
+    Io(io::Error),
 }
 
 pub struct Connection {
@@ -141,7 +246,7 @@ impl Connection {
         Ok(Self { stream })
     }
 
-    pub fn send(&mut self, req: Request) -> Result<(), io::Error> {
+    pub fn send(&mut self, req: Request) -> Result<Response, Error> {
         let mut buf = Vec::new();
         req.encode(&mut buf);
 
@@ -149,7 +254,16 @@ impl Connection {
         buf_with_len.extend((buf.len() as u32).to_le_bytes());
         buf_with_len.extend(buf);
 
-        self.stream.write_all(&buf_with_len)?;
-        Ok(())
+        self.stream.write_all(&buf_with_len).map_err(Error::Io)?;
+
+        let mut len = [0; 4];
+        self.stream.read_exact(&mut len).map_err(Error::Io)?;
+
+        let len = u32::from_le_bytes(len);
+
+        let mut buf = vec![0; len as usize];
+        self.stream.read_exact(&mut buf).map_err(Error::Io)?;
+
+        Response::decode(&buf[..])
     }
 }
