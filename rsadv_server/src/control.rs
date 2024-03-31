@@ -16,6 +16,8 @@ pub async fn control_loop(state: Arc<State>) {
         panic!("socket already in use");
     }
 
+    std::fs::remove_file(CONTROL_SOCKET_ADDR).unwrap();
+
     let socket = UnixListener::bind(CONTROL_SOCKET_ADDR).unwrap();
 
     loop {

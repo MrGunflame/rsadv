@@ -2,3 +2,5 @@ interface = "br0"
 mtu = 1492
 dns = "::"
 db = "db"
+min_rtr_adv_interval = "3s"
+max_rtr_adv_interval = "600s"

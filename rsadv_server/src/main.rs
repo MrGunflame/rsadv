@@ -16,20 +16,22 @@ use std::time::{Duration, Instant};
 use config::Config;
 use control::control_loop;
 use database::Database;
-use linux::{set_hop_limit, Interface};
+use futures::FutureExt;
+use linux::Interface;
 use ndp::{
     Encode, IcmpContent, IcmpOption, IcmpType, LinkLayerAddress, PrefixInformation,
     RecursiveDnsServer, RouterAdvertisement, RouterSolicitation,
 };
+use rand::distributions::Uniform;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use rsadv_control::Lifetime;
 use rtnetlink::new_connection;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::unix::AsyncFd;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 use crate::ndp::{Decode, IcmpPacket};
-
-const RADV_INTERVAL: Duration = Duration::from_secs(600);
 
 #[tokio::main]
 async fn main() {
@@ -38,10 +40,43 @@ async fn main() {
     let file = std::fs::read_to_string("config.toml").unwrap();
     let config: Config = toml::from_str(&file).unwrap();
 
+    // MaxRtrAdvInterval MUST be >= 4s && <= 1800s.
+    let max_rtr_adv_interval = match config.max_rtr_adv_interval {
+        v if v < Duration::from_secs(4) => {
+            tracing::warn!("max_rtr_adv_interval is < 4s; defaulting to 4s");
+            Duration::from_secs(4)
+        }
+        v if v > Duration::from_secs(1800) => {
+            tracing::warn!("max_rtr_adv_interval is > 1800s; defaulting to 1800s");
+            Duration::from_secs(1800)
+        }
+        v => v,
+    };
+
+    // MinRtrAdvInterval MUST be >= 3s && <= 0.75 * MaxRtrAdvInterval.
+    let min_rtr_adv_interval = match config.min_rtr_adv_interval {
+        v if v < Duration::from_secs(3) => {
+            tracing::warn!("min_rtr_adv_interval is < 3s; defaulting to 3s");
+            Duration::from_secs(3)
+        }
+        v if v > max_rtr_adv_interval * 4 / 3 => {
+            tracing::warn!("min_rtr_adv_interval is > .75 * max_rtr_adv_interval; defaulting to .75 * max_rtr_adv_interval");
+            max_rtr_adv_interval * 4 / 3
+        }
+        v => v,
+    };
+
     let (conn, handle, _) = new_connection().unwrap();
     tokio::task::spawn(conn);
 
-    let interface = Interface::new(&handle, &config.interface).await.unwrap();
+    let interface = match Interface::new(&handle, &config.interface).await {
+        Ok(interface) => interface,
+        Err(err) => {
+            tracing::error!("failed to open interface {}: {:?}", config.interface, err);
+            std::process::exit(1);
+        }
+    };
+
     let mac = interface.mac().await.unwrap();
     let addrs = interface.addrs().await.unwrap();
     let scope_id = interface.scope_id();
@@ -53,7 +88,13 @@ async fn main() {
 
     let local_addr = SocketAddrV6::new(link_local, 0, 0, scope_id);
 
-    let socket = IcmpSocket::new(local_addr).unwrap();
+    let socket = match IcmpSocket::new(local_addr) {
+        Ok(socket) => Arc::new(socket),
+        Err(err) => {
+            tracing::error!("failed to bind ICMP: {}", err);
+            std::process::exit(1);
+        }
+    };
 
     let packet = IcmpPacket {
         typ: IcmpType::RouterSolicitation,
@@ -64,7 +105,11 @@ async fn main() {
         }),
     };
 
-    let state = Arc::new(State::default());
+    let state = Arc::new(State {
+        prefixes: Default::default(),
+        mtu: config.mtu,
+        prefixes_changed: Default::default(),
+    });
 
     let mut db = match Database::load(&config.db) {
         Ok(db) => {
@@ -99,34 +144,162 @@ async fn main() {
     let mut buf = Vec::new();
     packet.encode(&mut buf);
 
-    let mut next_multicast_ra = Instant::now();
-
     tokio::task::spawn(control_loop(state.clone()));
 
-    loop {
-        let (addr, update_prefixes) = tokio::select! {
-            res = socket.recv_from() => {
-                let (packet, addr) = res.unwrap();
+    let (rs_tx, mut rs_rx) = mpsc::channel(512);
 
-                if !router_solicit_is_valid(&packet) {
-                    continue;
+    {
+        let socket = socket.clone();
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            let mut last_multicast_ra = Instant::now();
+            let mut next_multicast_ra = Instant::now();
+
+            // The interval between unsolicited RAs is chosen by a uniformly
+            // distributed random value between MinRtrAdvInterval and
+            // MaxRtrAdvInterval.
+            let uniform = Uniform::new(min_rtr_adv_interval, max_rtr_adv_interval);
+            let mut rng = SmallRng::from_entropy();
+
+            let mut initial_ras_sent = 0;
+
+            loop {
+                let addr = futures::select_biased! {
+                    _ = tokio::time::sleep_until(next_multicast_ra.into()).fuse() => {
+                        SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_ROUTERS, 0, 0, scope_id)
+                    }
+                    res = rs_rx.recv().fuse() => {
+                        let addr = res.unwrap();
+
+                        // All RAs in response to RSs MUST be delayed between 0 and `MAX_RA_DELAY_TIME`.
+                        let delay = rng.gen_range(Duration::ZERO..MAX_RA_DELAY_TIME);
+                        let ts = Instant::now() + delay;
+
+                        // If delaying would take longer then until the next multicast RA is scheduled
+                        // we discard the RS. The host will receive a multicast RA in time instead.
+                        if ts > next_multicast_ra {
+                            continue;
+                        }
+
+                        tokio::time::sleep_until(ts.into()).await;
+                        addr
+                    }
+                };
+
+                let mut options = vec![
+                    IcmpOption::Mtu(config.mtu),
+                    IcmpOption::RecursiveDnsServer(RecursiveDnsServer {
+                        addrs: vec![config.dns],
+                        lifetime: Duration::from_secs(3600),
+                    }),
+                    IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
+                ];
+
+                for prefix in state.prefixes.read().values() {
+                    // We only announce prefixes that are still valid.
+                    // Expired prefixes are removed by another task, but it is possible
+                    // for a prefix to just have gone invalid and we are running before
+                    // the other task has removed it.
+                    if prefix.valid_lifetime.duration().is_zero() {
+                        continue;
+                    }
+
+                    options.push(IcmpOption::PrefixInformation(PrefixInformation {
+                        prefix: prefix.prefix,
+                        prefix_length: prefix.prefix_length,
+                        on_link: true,
+                        autonomous: true,
+                        preferred_lifetime: prefix.preferred_lifetime.duration(),
+                        valid_lifetime: prefix.valid_lifetime.duration(),
+                    }));
                 }
 
-                (addr, false)
-            }
-            _ = tokio::time::sleep_until(next_multicast_ra.into()) => {
-                next_multicast_ra += RADV_INTERVAL;
-                (SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id), true)
-            }
-            _ = state.prefixes_changed.notified() => {
-                (SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id), true)
-            }
-        };
+                let packet = IcmpPacket {
+                    typ: IcmpType::RouterAdvertisement,
+                    code: 0,
+                    checksum: 0,
+                    content: IcmpContent::RouterAdvertisement(RouterAdvertisement {
+                        cur_hop_limit: 64,
+                        managed: false,
+                        other: false,
+                        router_lifetime: 3 * max_rtr_adv_interval,
+                        reachable_timer: None,
+                        retrans_timer: None,
+                        options,
+                    }),
+                };
 
-        if update_prefixes {
+                if let Err(err) = socket.send_to(&packet, addr).await {
+                    tracing::error!("failed to send RA: {}", err);
+                }
+
+                let mut interval = rng.sample(uniform);
+
+                // For the first MAX_INITIAL_RTR_ADVERTISEMENTS we should clamp the random
+                // interval to `MAX_INITIAL_RTR_ADVERT_INTERVAL`.
+                // TODO: We MAY repeat this procedure if the advertised information changes.
+                if initial_ras_sent < MAX_INITIAL_RTR_ADVERTISEMENTS {
+                    initial_ras_sent += 1;
+                    interval = Duration::min(interval, MAX_INITIAL_RTR_ADVERT_INTERVAL);
+                }
+
+                last_multicast_ra = next_multicast_ra;
+                next_multicast_ra += interval;
+            }
+        });
+    }
+
+    tokio::task::spawn(async move {
+        loop {
+            let (packet, addr) = match socket.recv_from().await {
+                Ok(res) => res,
+                Err(err) => {
+                    tracing::error!("failed to read from socket: {}", err);
+                    return;
+                }
+            };
+
+            if !router_solicit_is_valid(*addr.ip(), &packet) {
+                continue;
+            }
+
+            let _ = rs_tx.send(addr).await;
+        }
+    });
+
+    tokio::task::spawn(async move {
+        let mut next_prefix_lifetime = None;
+
+        loop {
+            // Wait until we get a new prefix or an existing prefix expires.
+            if let Some(next_prefix_lifetime) = next_prefix_lifetime {
+                futures::select_biased! {
+                    _ = state.prefixes_changed.notified().fuse() => (),
+                    _ = tokio::time::sleep(next_prefix_lifetime).fuse() => (),
+                }
+            } else {
+                state.prefixes_changed.notified().await;
+            }
+
+            state.prefixes.write().retain(|_, prefix| {
+                if prefix.valid_lifetime.duration().is_zero() {
+                    false
+                } else {
+                    let lifetime =
+                        next_prefix_lifetime.get_or_insert(prefix.valid_lifetime.duration());
+
+                    if prefix.valid_lifetime.duration() < *lifetime {
+                        *lifetime = prefix.valid_lifetime.duration();
+                    }
+
+                    true
+                }
+            });
+
             db.prefixes.clear();
 
-            for prefix in state.prefixes.read().values() {
+            let prefixes = state.prefixes.read().clone();
+            for prefix in prefixes.values() {
                 let addr = generate_addr(prefix.prefix, mac);
 
                 if let Err(err) = interface
@@ -138,7 +311,7 @@ async fn main() {
                     )
                     .await
                 {
-                    tracing::error!("adding address to interface failed: {:?}", err);
+                    tracing::error!("failed to add addr to interface: {:?}", err);
                 }
 
                 db.prefixes.push(database::Prefix {
@@ -159,49 +332,9 @@ async fn main() {
                 tracing::error!("failed to save db: {:?}", err);
             }
         }
+    });
 
-        let mut options = vec![
-            IcmpOption::Mtu(config.mtu),
-            IcmpOption::RecursiveDnsServer(RecursiveDnsServer {
-                addrs: vec![config.dns],
-                lifetime: Duration::from_secs(3600),
-            }),
-            IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
-        ];
-        state.prefixes.write().retain(|_, prefix| {
-            if prefix.valid_lifetime.duration().is_zero() {
-                false
-            } else {
-                options.push(IcmpOption::PrefixInformation(PrefixInformation {
-                    prefix: prefix.prefix,
-                    prefix_length: prefix.prefix_length,
-                    on_link: true,
-                    autonomous: true,
-                    preferred_lifetime: prefix.preferred_lifetime.duration(),
-                    valid_lifetime: prefix.valid_lifetime.duration(),
-                }));
-
-                true
-            }
-        });
-
-        let packet = IcmpPacket {
-            typ: IcmpType::RouterAdvertisement,
-            code: 0,
-            checksum: 0,
-            content: IcmpContent::RouterAdvertisement(RouterAdvertisement {
-                cur_hop_limit: 64,
-                managed: false,
-                other: false,
-                router_lifetime: Duration::from_secs(1800),
-                reachable_timer: None,
-                retrans_timer: None,
-                options,
-            }),
-        };
-
-        socket.send_to(&packet, addr).await.unwrap();
-    }
+    tokio::signal::ctrl_c().await.unwrap();
 }
 
 #[derive(Debug, Default)]
@@ -228,8 +361,9 @@ impl IcmpSocket {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
         socket.bind(&(addr.into()))?;
         socket.set_nonblocking(true)?;
-
-        set_hop_limit(&socket, 255).unwrap();
+        socket.join_multicast_v6(&Ipv6Addr::MULTICAST_ALL_ROUTERS, addr.scope_id())?;
+        socket.set_multicast_hops_v6(255)?;
+        socket.set_unicast_hops_v6(255)?;
 
         Ok(Self {
             socket: AsyncFd::new(socket)?,
@@ -281,14 +415,28 @@ fn is_link_local(addr: &Ipv6Addr) -> bool {
     addr.octets().starts_with(&[0xfe, 0x80])
 }
 
-// https://www.rfc-editor.org/rfc/rfc4861#section-7.1.1
-fn router_solicit_is_valid(packet: &IcmpPacket) -> bool {
+fn router_solicit_is_valid(src: Ipv6Addr, packet: &IcmpPacket) -> bool {
+    // https://www.rfc-editor.org/rfc/rfc4861#section-7.1.1
+    // Requirements for valid RS:
+    // - IP hop limit is set to 255
+    // - ICMP checksum is valid
+    // - ICMP code is 0
+    // - ICMP length is >= 8
+    // - All included options have length > 0
+    // - If src IP is unspecified, no source link layer addr in message
+
     if packet.code != 0 {
         return false;
     }
 
     match &packet.content {
-        IcmpContent::RouterSolicitation(sol) => true,
+        IcmpContent::RouterSolicitation(sol) => {
+            if src == Ipv6Addr::UNSPECIFIED {
+                sol.source_link_layer_addr.is_none()
+            } else {
+                true
+            }
+        }
         _ => false,
     }
 }
@@ -325,3 +473,10 @@ fn generate_addr(prefix: Ipv6Addr, mac: [u8; 6]) -> Ipv6Addr {
         mac[5],
     ])
 }
+
+const MAX_INITIAL_RTR_ADVERT_INTERVAL: Duration = Duration::from_secs(16);
+const MAX_INITIAL_RTR_ADVERTISEMENTS: u8 = 3;
+
+const MAX_FINAL_RTR_ADVERTISEMENTS: u8 = 3;
+const MIN_DELAY_BETWEEN_RAS: Duration = Duration::from_secs(3);
+const MAX_RA_DELAY_TIME: Duration = Duration::from_millis(500);

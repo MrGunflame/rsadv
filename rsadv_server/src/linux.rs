@@ -12,40 +12,6 @@ use netlink_packet_route::link::LinkAttribute;
 use rtnetlink::Handle;
 use socket2::Socket;
 
-pub fn set_hop_limit(socket: &Socket, hop_limit: u8) -> io::Result<()> {
-    let ttl: c_int = hop_limit as i32;
-
-    unsafe {
-        let res = setsockopt(
-            socket.as_fd().as_raw_fd(),
-            IPPROTO_IPV6,
-            IPV6_MULTICAST_HOPS,
-            &ttl as *const c_int as *const c_void,
-            mem::size_of_val(&ttl) as socklen_t,
-        );
-
-        if res != 0 {
-            return Err(io::Error::from_raw_os_error(res));
-        }
-    }
-
-    unsafe {
-        let res = setsockopt(
-            socket.as_fd().as_raw_fd(),
-            IPPROTO_IPV6,
-            IPV6_UNICAST_HOPS,
-            &ttl as *const c_int as *const c_void,
-            mem::size_of_val(&ttl) as socklen_t,
-        );
-
-        if res != 0 {
-            return Err(io::Error::from_raw_os_error(res));
-        }
-    }
-
-    Ok(())
-}
-
 #[derive(Debug)]
 pub enum Error {
     Rt(rtnetlink::Error),
