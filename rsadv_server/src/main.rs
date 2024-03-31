@@ -158,6 +158,7 @@ async fn main() {
             // The interval between unsolicited RAs is chosen by a uniformly
             // distributed random value between MinRtrAdvInterval and
             // MaxRtrAdvInterval.
+            debug_assert!(min_rtr_adv_interval <= MIN_DELAY_BETWEEN_RAS);
             let uniform = Uniform::new(min_rtr_adv_interval, max_rtr_adv_interval);
             let mut rng = SmallRng::from_entropy();
 
@@ -183,25 +184,19 @@ async fn main() {
 
                         // If the source address is UNSPECIFIED we MUST send a multicast RA instead,
                         // otherwise we can send it directly to the host as a unicast.
-                        tokio::time::sleep_until(ts.into()).await;
                         if addr.ip().is_unspecified() {
-                            SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
-                        } else {
-                            addr
+                            // Multicast RAs MUST be sent no faster than `MIN_DELAY_BETWEEN_RAS`.
+                            let ra_delay = MIN_DELAY_BETWEEN_RAS.checked_sub(last_multicast_ra.elapsed()).unwrap_or_default();
+                            next_multicast_ra += ra_delay + delay;
+                            continue;
                         }
 
+                        // Note that since ts < next_multicast_ra this sleep will never block
+                        // for longer than the other branch.
+                        tokio::time::sleep_until(ts.into()).await;
+                        addr
                     }
                 };
-
-                // Multicast RAs MUST be sent no faster than `MIN_DELAY_BETWEEN_RAS`.
-                if addr.ip().is_multicast() {
-                    let elapsed_since_ra = last_multicast_ra.elapsed();
-                    if elapsed_since_ra < MIN_DELAY_BETWEEN_RAS {
-                        // FIXME: This sleep will block unicast RAs even though they are
-                        // always legal without rate limiting.
-                        tokio::time::sleep(MIN_DELAY_BETWEEN_RAS - elapsed_since_ra).await;
-                    }
-                }
 
                 let mut options = vec![
                     IcmpOption::Mtu(config.mtu),
