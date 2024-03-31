@@ -41,7 +41,7 @@ async fn main() {
     let config: Config = toml::from_str(&file).unwrap();
 
     // MaxRtrAdvInterval MUST be >= 4s && <= 1800s.
-    let max_rtr_adv_interval = match config.max_rtr_adv_interval {
+    let max_rtr_adv_interval = match Duration::from_secs(config.max_rtr_adv_interval) {
         v if v < Duration::from_secs(4) => {
             tracing::warn!("max_rtr_adv_interval is < 4s; defaulting to 4s");
             Duration::from_secs(4)
@@ -54,7 +54,7 @@ async fn main() {
     };
 
     // MinRtrAdvInterval MUST be >= 3s && <= 0.75 * MaxRtrAdvInterval.
-    let min_rtr_adv_interval = match config.min_rtr_adv_interval {
+    let min_rtr_adv_interval = match Duration::from_secs(config.min_rtr_adv_interval) {
         v if v < Duration::from_secs(3) => {
             tracing::warn!("min_rtr_adv_interval is < 3s; defaulting to 3s");
             Duration::from_secs(3)

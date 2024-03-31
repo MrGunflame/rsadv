@@ -1,5 +1,4 @@
 use std::net::Ipv6Addr;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +8,6 @@ pub struct Config {
     pub mtu: u32,
     pub dns: Ipv6Addr,
     pub db: String,
-    pub min_rtr_adv_interval: Duration,
-    pub max_rtr_adv_interval: Duration,
+    pub min_rtr_adv_interval: u64,
+    pub max_rtr_adv_interval: u64,
 }
