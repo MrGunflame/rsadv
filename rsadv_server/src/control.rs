@@ -1,6 +1,8 @@
+use std::io::{self, ErrorKind};
 use std::sync::Arc;
 
 use rsadv_control::{Request, Response};
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -8,20 +10,34 @@ use crate::State;
 
 const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 
-pub async fn control_loop(state: Arc<State>) {
-    // connect will return ECONNREFUSED if the socket file exists but
-    // no one is listening. In that case we take over the socket
-    // (e.g. becuase the previous process crashed without removing the socket).
-    if UnixStream::connect(CONTROL_SOCKET_ADDR).await.is_ok() {
-        panic!("socket already in use");
+#[derive(Debug, Error)]
+pub enum ControlSocketError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("socket is already in use")]
+    SocketInUse,
+}
+
+pub async fn control_loop(state: Arc<State>) -> Result<(), ControlSocketError> {
+    if tokio::fs::try_exists(CONTROL_SOCKET_ADDR).await? {
+        // connect will return ECONNREFUSED if the socket file exists but
+        // no one is listening. In that case we take over the socket
+        // (e.g. becuase the previous process crashed without removing the socket).
+        match UnixStream::connect(CONTROL_SOCKET_ADDR).await {
+            Ok(_) => return Err(ControlSocketError::SocketInUse),
+            Err(err) if err.kind() != ErrorKind::ConnectionRefused => {
+                return Err(err.into());
+            }
+            _ => (),
+        }
+
+        tokio::fs::remove_file(CONTROL_SOCKET_ADDR).await?;
     }
 
-    std::fs::remove_file(CONTROL_SOCKET_ADDR).unwrap();
-
-    let socket = UnixListener::bind(CONTROL_SOCKET_ADDR).unwrap();
+    let socket = UnixListener::bind(CONTROL_SOCKET_ADDR)?;
 
     loop {
-        let (stream, _) = socket.accept().await.unwrap();
+        let (stream, _) = socket.accept().await?;
 
         tokio::task::spawn(handle_conn(stream, state.clone()));
     }
@@ -69,6 +85,12 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
             Request::RemovePrefix(prefix) => {
                 state.prefixes.write().remove(&prefix.prefix);
                 state.prefixes_changed.notify_one();
+            }
+            Request::AddDnsServer(server) => {
+                state.dns_servers.write().insert(server.addr);
+            }
+            Request::RemoveDnsServer(server) => {
+                state.dns_servers.write().remove(&server.addr);
             }
         }
 

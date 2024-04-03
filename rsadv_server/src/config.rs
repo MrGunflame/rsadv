@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::{self, Read};
-use std::net::Ipv6Addr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,6 @@ use thiserror::Error;
 pub struct Config {
     pub interface: String,
     pub mtu: u32,
-    pub dns: Ipv6Addr,
     pub db: String,
     pub min_rtr_adv_interval: u64,
     pub max_rtr_adv_interval: u64,

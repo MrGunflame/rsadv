@@ -11,6 +11,8 @@ const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 pub enum Request {
     AddPrefix(Prefix),
     RemovePrefix(Prefix),
+    AddDnsServer(DnsServer),
+    RemoveDnsServer(DnsServer),
 }
 
 impl Request {
@@ -71,6 +73,40 @@ impl Request {
                     Lifetime::Duration(dur) => {
                         buf.put_u8(1);
                         buf.put_u32(dur.as_secs() as u32);
+                    }
+                    Lifetime::Until(ts) => {
+                        let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+                        buf.put_u8(2u8);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                }
+            }
+            Self::AddDnsServer(server) => {
+                buf.put_u32_le(3);
+
+                buf.put_slice(&server.addr.octets());
+
+                match server.lifetime {
+                    Lifetime::Duration(dur) => {
+                        buf.put_u8(1);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                    Lifetime::Until(ts) => {
+                        let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+                        buf.put_u8(2u8);
+                        buf.put_u32_le(dur.as_secs() as u32);
+                    }
+                }
+            }
+            Self::RemoveDnsServer(server) => {
+                buf.put_u32_le(4);
+
+                buf.put_slice(&server.addr.octets());
+
+                match server.lifetime {
+                    Lifetime::Duration(dur) => {
+                        buf.put_u8(1);
+                        buf.put_u32_le(dur.as_secs() as u32);
                     }
                     Lifetime::Until(ts) => {
                         let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
@@ -161,6 +197,52 @@ impl Request {
                     valid_lifetime,
                 }))
             }
+            3 => {
+                if buf.remaining() < 16 + 1 + 4 {
+                    return Err(Error::Eof);
+                }
+
+                let mut addr = [0; 16];
+                for index in 0..16 {
+                    addr[index] = buf.get_u8();
+                }
+
+                let lifetime = match buf.get_u8() {
+                    1 => Lifetime::Duration(Duration::from_secs(buf.get_u32_le().into())),
+                    2 => Lifetime::Until(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(buf.get_u32_le().into()),
+                    ),
+                    _ => return Err(Error::Eof),
+                };
+
+                Ok(Self::AddDnsServer(DnsServer {
+                    addr: Ipv6Addr::from(addr),
+                    lifetime,
+                }))
+            }
+            4 => {
+                if buf.remaining() < 16 + 1 + 4 {
+                    return Err(Error::Eof);
+                }
+
+                let mut addr = [0; 16];
+                for index in 0..16 {
+                    addr[index] = buf.get_u8();
+                }
+
+                let lifetime = match buf.get_u8() {
+                    1 => Lifetime::Duration(Duration::from_secs(buf.get_u32_le().into())),
+                    2 => Lifetime::Until(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(buf.get_u32_le().into()),
+                    ),
+                    _ => return Err(Error::Eof),
+                };
+
+                Ok(Self::RemoveDnsServer(DnsServer {
+                    addr: Ipv6Addr::from(addr),
+                    lifetime,
+                }))
+            }
             _ => Err(Error::Eof),
         }
     }
@@ -172,6 +254,12 @@ pub struct Prefix {
     pub prefix_length: u8,
     pub preferred_lifetime: Lifetime,
     pub valid_lifetime: Lifetime,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DnsServer {
+    pub addr: Ipv6Addr,
+    pub lifetime: Lifetime,
 }
 
 #[derive(Copy, Clone, Debug)]

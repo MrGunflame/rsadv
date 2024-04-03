@@ -1,6 +1,12 @@
 [workspace]
+resolver = "2"
 members = [
     "rsadv_control",
     "rsadv_control_cli",
     "rsadv_server",
 ]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug-assertions = false

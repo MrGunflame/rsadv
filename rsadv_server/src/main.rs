@@ -7,7 +7,7 @@ mod database;
 mod linux;
 mod ndp;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddrV6};
 use std::sync::Arc;
@@ -116,6 +116,7 @@ async fn main() {
         prefixes: Default::default(),
         mtu: config.mtu,
         prefixes_changed: Default::default(),
+        dns_servers: Default::default(),
     });
 
     let mut db = match Database::load(&config.db) {
@@ -151,7 +152,15 @@ async fn main() {
     let mut buf = Vec::new();
     packet.encode(&mut buf);
 
-    tokio::task::spawn(control_loop(state.clone()));
+    {
+        let state = state.clone();
+        tokio::task::spawn(async move {
+            if let Err(err) = control_loop(state).await {
+                tracing::error!("failed to run control loop: {}", err);
+                SHUTDOWN.quit();
+            }
+        });
+    }
 
     let (rs_tx, mut rs_rx) = mpsc::channel(512);
 
@@ -219,12 +228,21 @@ async fn main() {
 
                 let mut options = vec![
                     IcmpOption::Mtu(config.mtu),
-                    IcmpOption::RecursiveDnsServer(RecursiveDnsServer {
-                        addrs: vec![config.dns],
-                        lifetime: Duration::from_secs(3600),
-                    }),
                     IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
                 ];
+
+                {
+                    let dns = state.dns_servers.read();
+
+                    if !dns.is_empty() {
+                        let addrs = dns.iter().copied().collect();
+
+                        options.push(IcmpOption::RecursiveDnsServer(RecursiveDnsServer {
+                            addrs,
+                            lifetime: Duration::from_secs(3600),
+                        }));
+                    }
+                }
 
                 for prefix in state.prefixes.read().values() {
                     // We only announce prefixes that are still valid.
@@ -381,6 +399,7 @@ pub struct State {
     prefixes: parking_lot::RwLock<HashMap<Ipv6Addr, Prefix>>,
     mtu: u32,
     prefixes_changed: Notify,
+    dns_servers: parking_lot::RwLock<HashSet<Ipv6Addr>>,
 }
 
 #[derive(Clone, Debug)]

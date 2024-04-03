@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Database {
     pub prefixes: Vec<Prefix>,
+    pub dns_servers: Vec<Ipv6Addr>,
 }
 
 impl Database {
