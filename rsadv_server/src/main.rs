@@ -115,7 +115,7 @@ async fn main() {
     let state = Arc::new(State {
         prefixes: Default::default(),
         mtu: config.mtu,
-        prefixes_changed: Default::default(),
+        config_changed: Default::default(),
         dns_servers: Default::default(),
     });
 
@@ -162,7 +162,7 @@ async fn main() {
         });
     }
 
-    let (rs_tx, mut rs_rx) = mpsc::channel(512);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(512);
 
     {
         let socket = socket.clone();
@@ -183,6 +183,11 @@ async fn main() {
 
             pin_mut!(shutdown);
             loop {
+                tracing::info!(
+                    "next multicast RA in {:?}",
+                    Instant::now() - next_multicast_ra
+                );
+
                 let addr = futures::select_biased! {
                     _ = shutdown.as_mut().fuse() => {
                         SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
@@ -190,32 +195,39 @@ async fn main() {
                     _ = tokio::time::sleep_until(next_multicast_ra.into()).fuse() => {
                         SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
                     }
-                    res = rs_rx.recv().fuse() => {
-                        let addr: SocketAddrV6 = res.unwrap();
+                    res = cmd_rx.recv().fuse() => {
+                        match res.unwrap() {
+                            Command::SendRouterAdvertisement(addr) => {
+                                // All RAs in response to RSs MUST be delayed between 0 and `MAX_RA_DELAY_TIME`.
+                                let delay = rng.gen_range(Duration::ZERO..MAX_RA_DELAY_TIME);
+                                let ts = Instant::now() + delay;
 
-                        // All RAs in response to RSs MUST be delayed between 0 and `MAX_RA_DELAY_TIME`.
-                        let delay = rng.gen_range(Duration::ZERO..MAX_RA_DELAY_TIME);
-                        let ts = Instant::now() + delay;
+                                // If delaying would take longer then until the next multicast RA is scheduled
+                                // we discard the RS. The host will receive a multicast RA in time instead.
+                                if ts > next_multicast_ra {
+                                    continue;
+                                }
 
-                        // If delaying would take longer then until the next multicast RA is scheduled
-                        // we discard the RS. The host will receive a multicast RA in time instead.
-                        if ts > next_multicast_ra {
-                            continue;
+                                // If the source address is UNSPECIFIED we MUST send a multicast RA instead,
+                                // otherwise we can send it directly to the host as a unicast.
+                                if addr.ip().is_unspecified() {
+                                    // Multicast RAs MUST be sent no faster than `MIN_DELAY_BETWEEN_RAS`.
+                                    let ra_delay = MIN_DELAY_BETWEEN_RAS.checked_sub(last_multicast_ra.elapsed()).unwrap_or_default();
+                                    next_multicast_ra += ra_delay + delay;
+                                    continue;
+                                }
+
+                                // Note that since ts < next_multicast_ra this sleep will never block
+                                // for longer than the other branch.
+                                tokio::time::sleep_until(ts.into()).await;
+                                addr
+                            },
+                            Command::NewConfig => {
+                                next_multicast_ra = Instant::now();
+                                initial_ras_sent = 0;
+                                SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
+                            }
                         }
-
-                        // If the source address is UNSPECIFIED we MUST send a multicast RA instead,
-                        // otherwise we can send it directly to the host as a unicast.
-                        if addr.ip().is_unspecified() {
-                            // Multicast RAs MUST be sent no faster than `MIN_DELAY_BETWEEN_RAS`.
-                            let ra_delay = MIN_DELAY_BETWEEN_RAS.checked_sub(last_multicast_ra.elapsed()).unwrap_or_default();
-                            next_multicast_ra += ra_delay + delay;
-                            continue;
-                        }
-
-                        // Note that since ts < next_multicast_ra this sleep will never block
-                        // for longer than the other branch.
-                        tokio::time::sleep_until(ts.into()).await;
-                        addr
                     }
                 };
 
@@ -306,23 +318,26 @@ async fn main() {
         });
     }
 
-    tokio::task::spawn(async move {
-        loop {
-            let (packet, addr) = match socket.recv_from().await {
-                Ok(res) => res,
-                Err(err) => {
-                    tracing::error!("failed to read from socket: {}", err);
-                    return;
+    {
+        let cmd_tx = cmd_tx.clone();
+        tokio::task::spawn(async move {
+            loop {
+                let (packet, addr) = match socket.recv_from().await {
+                    Ok(res) => res,
+                    Err(err) => {
+                        tracing::error!("failed to read from socket: {}", err);
+                        return;
+                    }
+                };
+
+                if !router_solicit_is_valid(*addr.ip(), &packet) {
+                    continue;
                 }
-            };
 
-            if !router_solicit_is_valid(*addr.ip(), &packet) {
-                continue;
+                let _ = cmd_tx.send(Command::SendRouterAdvertisement(addr)).await;
             }
-
-            let _ = rs_tx.send(addr).await;
-        }
-    });
+        });
+    }
 
     tokio::task::spawn(async move {
         let mut next_prefix_lifetime = None;
@@ -331,11 +346,11 @@ async fn main() {
             // Wait until we get a new prefix or an existing prefix expires.
             if let Some(next_prefix_lifetime) = next_prefix_lifetime {
                 futures::select_biased! {
-                    _ = state.prefixes_changed.notified().fuse() => (),
+                    _ = state.config_changed.notified().fuse() => (),
                     _ = tokio::time::sleep(next_prefix_lifetime).fuse() => (),
                 }
             } else {
-                state.prefixes_changed.notified().await;
+                state.config_changed.notified().await;
             }
 
             state.prefixes.write().retain(|_, prefix| {
@@ -354,6 +369,7 @@ async fn main() {
             });
 
             db.prefixes.clear();
+            db.dns_servers.clear();
 
             let prefixes = state.prefixes.read().clone();
             for prefix in prefixes.values() {
@@ -385,6 +401,10 @@ async fn main() {
                 });
             }
 
+            for dns in state.dns_servers.read().clone() {
+                db.dns_servers.push(dns);
+            }
+
             if let Err(err) = db.save(&config.db) {
                 tracing::error!("failed to save db: {:?}", err);
             }
@@ -398,7 +418,7 @@ async fn main() {
 pub struct State {
     prefixes: parking_lot::RwLock<HashMap<Ipv6Addr, Prefix>>,
     mtu: u32,
-    prefixes_changed: Notify,
+    config_changed: Notify,
     dns_servers: parking_lot::RwLock<HashSet<Ipv6Addr>>,
 }
 
@@ -547,3 +567,9 @@ const MAX_INITIAL_RTR_ADVERTISEMENTS: u8 = 3;
 const MAX_FINAL_RTR_ADVERTISEMENTS: u8 = 3;
 const MIN_DELAY_BETWEEN_RAS: Duration = Duration::from_secs(3);
 const MAX_RA_DELAY_TIME: Duration = Duration::from_millis(500);
+
+#[derive(Copy, Clone, Debug)]
+enum Command {
+    SendRouterAdvertisement(SocketAddrV6),
+    NewConfig,
+}

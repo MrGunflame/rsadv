@@ -80,17 +80,19 @@ async fn handle_conn(mut conn: UnixStream, state: Arc<State>) {
                     },
                 );
 
-                state.prefixes_changed.notify_one();
+                state.config_changed.notify_one();
             }
             Request::RemovePrefix(prefix) => {
                 state.prefixes.write().remove(&prefix.prefix);
-                state.prefixes_changed.notify_one();
+                state.config_changed.notify_one();
             }
             Request::AddDnsServer(server) => {
                 state.dns_servers.write().insert(server.addr);
+                state.config_changed.notify_one();
             }
             Request::RemoveDnsServer(server) => {
                 state.dns_servers.write().remove(&server.addr);
+                state.config_changed.notify_one();
             }
         }
 
