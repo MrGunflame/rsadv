@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut};
 
 const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     AddPrefix(Prefix),
     RemovePrefix(Prefix),
@@ -42,7 +42,7 @@ impl Request {
                 match prefix.valid_lifetime {
                     Lifetime::Duration(dur) => {
                         buf.put_u8(1);
-                        buf.put_u32(dur.as_secs() as u32);
+                        buf.put_u32_le(dur.as_secs() as u32);
                     }
                     Lifetime::Until(ts) => {
                         let dur = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap();
@@ -248,7 +248,7 @@ impl Request {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Prefix {
     pub prefix: Ipv6Addr,
     pub prefix_length: u8,
@@ -256,13 +256,13 @@ pub struct Prefix {
     pub valid_lifetime: Lifetime,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DnsServer {
     pub addr: Ipv6Addr,
     pub lifetime: Lifetime,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Lifetime {
     Duration(Duration),
     Until(SystemTime),
@@ -353,5 +353,29 @@ impl Connection {
         self.stream.read_exact(&mut buf).map_err(Error::Io)?;
 
         Response::decode(&buf[..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv6Addr;
+    use std::time::Duration;
+
+    use crate::{Lifetime, Prefix, Request};
+
+    #[test]
+    fn encode_decode() {
+        let req = Request::AddPrefix(Prefix {
+            prefix: Ipv6Addr::UNSPECIFIED,
+            prefix_length: 0,
+            preferred_lifetime: Lifetime::Duration(Duration::from_secs(3600)),
+            valid_lifetime: Lifetime::Duration(Duration::from_secs(3600)),
+        });
+
+        let mut buf = Vec::new();
+        req.encode(&mut buf);
+
+        let output = Request::decode(&buf[..]).unwrap();
+        assert_eq!(req, output);
     }
 }
