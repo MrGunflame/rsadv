@@ -185,7 +185,7 @@ async fn main() {
             loop {
                 tracing::info!(
                     "next multicast RA in {:?}",
-                    Instant::now() - next_multicast_ra
+                    next_multicast_ra - Instant::now()
                 );
 
                 let addr = futures::select_biased! {
@@ -367,6 +367,9 @@ async fn main() {
                     true
                 }
             });
+
+            // Config has changed and we should send a new multicast RA.
+            let _ = cmd_tx.send(Command::NewConfig).await;
 
             db.prefixes.clear();
             db.dns_servers.clear();
