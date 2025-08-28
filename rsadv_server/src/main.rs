@@ -308,6 +308,9 @@ async fn main() {
                     interval = Duration::min(interval, MAX_INITIAL_RTR_ADVERT_INTERVAL);
                 }
 
+                debug_assert!(interval >= MIN_DELAY_BETWEEN_RAS);
+                debug_assert!(interval <= MAX_DELAY_BETWEEN_RAS);
+
                 last_multicast_ra = next_multicast_ra;
                 next_multicast_ra += interval;
             }
@@ -568,8 +571,10 @@ const MAX_INITIAL_RTR_ADVERT_INTERVAL: Duration = Duration::from_secs(16);
 const MAX_INITIAL_RTR_ADVERTISEMENTS: u8 = 3;
 
 const MAX_FINAL_RTR_ADVERTISEMENTS: u8 = 3;
-const MIN_DELAY_BETWEEN_RAS: Duration = Duration::from_secs(3);
 const MAX_RA_DELAY_TIME: Duration = Duration::from_millis(500);
+
+const MIN_DELAY_BETWEEN_RAS: Duration = Duration::from_secs(3);
+const MAX_DELAY_BETWEEN_RAS: Duration = Duration::from_secs(1800);
 
 #[derive(Copy, Clone, Debug)]
 enum Command {
