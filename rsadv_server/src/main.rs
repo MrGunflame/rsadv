@@ -62,6 +62,16 @@ async fn main() {
 
     // MinRtrAdvInterval MUST be >= 3s && <= 0.75 * MaxRtrAdvInterval.
     let min_rtr_adv_interval = match Duration::from_secs(config.min_rtr_adv_interval) {
+        // We use 0 as a "default" value.
+        // Default is 0.33 * MaxRtrAdvInterval if MaxRtrAdvInterval >= 9 seconds,
+        // otherwise default is MaxRtrAdvInterval.
+        Duration::ZERO => {
+            if max_rtr_adv_interval >= Duration::from_secs(9) {
+                max_rtr_adv_interval / 3
+            } else {
+                max_rtr_adv_interval
+            }
+        }
         v if v < Duration::from_secs(3) => {
             tracing::warn!("min_rtr_adv_interval is < 3s; defaulting to 3s");
             Duration::from_secs(3)
