@@ -1,6 +1,36 @@
+# The network interface where the router is advertised.
 interface = "br0"
-mtu = 1492
-dns = "::"
+
+# The MTU announced by Router advertisements.
+# If set to 0 no MTU option is sent.
+#
+# Default: 0
+mtu = 0
+
+# The database location.
+#
+# Note that rsadv must have permissions to create/write the database file.
 db = "db"
-min_rtr_adv_interval = 3
+
+# The maximum time allowed between unsolicited router advertisements in seconds.
+#
+# Note that this value is always clamped between 4 and 1800 seconds.
+#
+# This value is called "MaxRtrAdvInterval" in RFC 4861, refer to 
+# https://datatracker.ietf.org/doc/html/rfc4861#section-6.2.1 for more information.
+#
+# Default: 600
 max_rtr_adv_interval = 600
+
+# The minimum time allowed between unsolicited router advertisements in seconds.
+#
+# Note that this value is always clamped between 3 and 0.75 * max_rtr_adv_interval seconds.
+# A value of indicates the default value of:
+# - 0.33 * max_rtr_adv_interval if max_rtr_adv_interval >= 9 seconds,
+# - max_rtr_adv_interval otherwise.
+#
+# This value is called "MinRtrAdvInterval" in RFC 4861, refer to 
+# https://datatracker.ietf.org/doc/html/rfc4861#section-6.2.1 for more information.
+#
+# Default: 0
+min_rtr_adv_interval = 3
