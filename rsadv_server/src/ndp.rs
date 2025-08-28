@@ -265,8 +265,8 @@ impl Decode for IcmpOption {
                 u32::decode(&mut buf)?;
 
                 let mut prefix = [0; 16];
-                for index in 0..16 {
-                    prefix[index] = u8::decode(&mut buf)?;
+                for b in &mut prefix {
+                    *b = u8::decode(&mut buf)?;
                 }
 
                 Ok(Self::PrefixInformation(PrefixInformation {
@@ -301,8 +301,8 @@ impl Decode for IcmpOption {
                 let num_addrs = len.saturating_sub(1) / 2;
                 for _ in 0..num_addrs {
                     let mut addr = [0; 16];
-                    for index in 0..16 {
-                        addr[index] = u8::decode(&mut buf)?;
+                    for b in &mut addr {
+                        *b = u8::decode(&mut buf)?;
                     }
 
                     addrs.push(Ipv6Addr::from(addr));
@@ -359,8 +359,8 @@ impl Decode for LinkLayerAddress {
         B: Buf,
     {
         let mut bytes = [0; 6];
-        for index in 0..6 {
-            bytes[index] = u8::decode(&mut buf)?;
+        for b in &mut bytes {
+            *b = u8::decode(&mut buf)?;
         }
 
         Ok(Self(bytes))

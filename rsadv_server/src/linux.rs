@@ -1,16 +1,10 @@
-use std::ffi::{c_int, c_void};
-use std::io;
-use std::mem;
 use std::net::{IpAddr, Ipv6Addr};
-use std::os::fd::{AsFd, AsRawFd};
 use std::time::Duration;
 
 use futures::TryStreamExt;
-use libc::{setsockopt, socklen_t, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, IPV6_UNICAST_HOPS};
 use netlink_packet_route::address::{AddressAttribute, CacheInfo};
 use netlink_packet_route::link::LinkAttribute;
 use rtnetlink::Handle;
-use socket2::Socket;
 
 #[derive(Debug)]
 pub enum Error {
@@ -47,14 +41,11 @@ impl Interface {
         let mut links = self.handle.link().get().match_index(self.index).execute();
         if let Some(link) = links.try_next().await.map_err(Error::Rt)? {
             for attr in &link.attributes {
-                match attr {
-                    LinkAttribute::Address(addr) => {
-                        return match addr.as_slice().try_into() {
-                            Ok(mac) => Ok(mac),
-                            Err(_) => Err(Error::NoMac),
-                        }
-                    }
-                    _ => (),
+                if let LinkAttribute::Address(addr) = attr {
+                    return match addr.as_slice().try_into() {
+                        Ok(mac) => Ok(mac),
+                        Err(_) => Err(Error::NoMac),
+                    };
                 }
             }
         }
@@ -73,14 +64,8 @@ impl Interface {
         let mut addrs = Vec::new();
         while let Some(link) = links.try_next().await.map_err(Error::Rt)? {
             for attr in &link.attributes {
-                match attr {
-                    AddressAttribute::Address(addr) => match addr {
-                        IpAddr::V6(addr) => {
-                            addrs.push(*addr);
-                        }
-                        _ => (),
-                    },
-                    _ => (),
+                if let AddressAttribute::Address(IpAddr::V6(addr)) = attr {
+                    addrs.push(*addr);
                 }
             }
         }
@@ -98,7 +83,7 @@ impl Interface {
         let mut msg = self
             .handle
             .address()
-            .add(self.index, addr.into(), prefix_len)
+            .add(self.index, addr, prefix_len)
             // Overwrite existing addresses, this means we're setting the
             // lifetime to a new value without changing the address.
             .replace();
@@ -114,10 +99,7 @@ impl Interface {
             .attributes
             .push(AddressAttribute::CacheInfo(cache_info));
 
-        match msg.execute().await {
-            Ok(()) => Ok(()),
-            Err(err) => return Err(Error::Rt(err)),
-        }
+        msg.execute().await.map_err(Error::Rt)
     }
 
     pub async fn del_addr(&self, addr: IpAddr) -> Result<(), Error> {
@@ -130,19 +112,16 @@ impl Interface {
 
         while let Some(resp) = addrs.try_next().await.map_err(Error::Rt)? {
             for attr in &resp.attributes {
-                match attr {
-                    AddressAttribute::Address(a) => {
-                        if *a == addr {
-                            self.handle
-                                .address()
-                                .del(resp)
-                                .execute()
-                                .await
-                                .map_err(Error::Rt)?;
-                            return Ok(());
-                        }
+                if let AddressAttribute::Address(a) = attr {
+                    if *a == addr {
+                        self.handle
+                            .address()
+                            .del(resp)
+                            .execute()
+                            .await
+                            .map_err(Error::Rt)?;
+                        return Ok(());
                     }
-                    _ => (),
                 }
             }
         }

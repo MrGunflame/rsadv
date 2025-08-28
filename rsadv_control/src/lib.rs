@@ -133,8 +133,8 @@ impl Request {
                 }
 
                 let mut prefix = [0; 16];
-                for index in 0..16 {
-                    prefix[index] = buf.get_u8();
+                for b in &mut prefix {
+                    *b = buf.get_u8();
                 }
 
                 let prefix_length = buf.get_u8();
@@ -168,8 +168,8 @@ impl Request {
                 }
 
                 let mut prefix = [0; 16];
-                for index in 0..16 {
-                    prefix[index] = buf.get_u8();
+                for b in &mut prefix {
+                    *b = buf.get_u8();
                 }
 
                 let prefix_length = buf.get_u8();
@@ -203,8 +203,8 @@ impl Request {
                 }
 
                 let mut addr = [0; 16];
-                for index in 0..16 {
-                    addr[index] = buf.get_u8();
+                for b in &mut addr {
+                    *b = buf.get_u8();
                 }
 
                 let lifetime = match buf.get_u8() {
@@ -226,8 +226,8 @@ impl Request {
                 }
 
                 let mut addr = [0; 16];
-                for index in 0..16 {
-                    addr[index] = buf.get_u8();
+                for b in &mut addr {
+                    *b = buf.get_u8();
                 }
 
                 let lifetime = match buf.get_u8() {
