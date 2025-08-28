@@ -238,10 +238,11 @@ async fn main() {
                     3 * max_rtr_adv_interval
                 };
 
-                let mut options = vec![
-                    IcmpOption::Mtu(config.mtu),
-                    IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac)),
-                ];
+                let mut options = vec![IcmpOption::SourceLinkLayerAddress(LinkLayerAddress(mac))];
+
+                if config.mtu != 0 {
+                    options.push(IcmpOption::Mtu(config.mtu));
+                }
 
                 {
                     let dns = state.dns_servers.read();
