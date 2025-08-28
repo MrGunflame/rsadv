@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::ndp::{Decode, IcmpPacket};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     pretty_env_logger::init();
     ragequit::init();
