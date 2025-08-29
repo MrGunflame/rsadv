@@ -1,11 +1,12 @@
 use std::io::{self, Read, Write};
 use std::net::Ipv6Addr;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use bytes::{Buf, BufMut};
 
-const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
+pub const CONTROL_SOCKET_ADDR: &str = "/run/rsadv.sock";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -317,9 +318,11 @@ impl Response {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("unexpected eof")]
     Eof,
+    #[error(transparent)]
     Io(io::Error),
 }
 
@@ -328,8 +331,8 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new() -> Result<Self, io::Error> {
-        let stream = UnixStream::connect(CONTROL_SOCKET_ADDR)?;
+    pub fn new(addr: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let stream = UnixStream::connect(addr)?;
 
         Ok(Self { stream })
     }
