@@ -12,6 +12,7 @@ pub struct Config {
     pub db: String,
     pub min_rtr_adv_interval: u64,
     pub max_rtr_adv_interval: u64,
+    pub announce_on_exit: bool,
 }
 
 impl Config {

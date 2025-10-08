@@ -200,6 +200,10 @@ async fn main() {
 
                 let addr = futures::select_biased! {
                     _ = shutdown.as_mut().fuse() => {
+                        if !config.announce_on_exit {
+                            return;
+                        }
+
                         SocketAddrV6::new(Ipv6Addr::MULTICAST_ALL_NODES, 0, 0, scope_id)
                     },
                     _ = tokio::time::sleep_until(next_multicast_ra.into()).fuse() => {
